@@ -56,12 +56,63 @@ BADGES = {
 SYNTHETIC_TYPES = ["Yükselen Trend", "Düşen Trend", "Yatay Piyasa", "Breakout",
                    "Fake Breakout", "Pullback", "Hacimli Yükseliş", "RSI Zayıflığı"]
 
+# Momentum / breakout taraması için geniş evren (Qullamaggie/Minervini tarzı adaylar)
+MOMENTUM_UNIVERSE = [
+    "NVDA", "ARM", "SMCI", "PLTR", "COIN", "FCEL", "FLNC", "MSTR", "APP", "VRT",
+    "CLS", "POWL", "ANET", "AVGO", "MU", "AMD", "TSLA", "NET", "CRWD", "DDOG",
+    "SHOP", "PANW", "SNOW", "MARA", "RIOT", "CVNA", "AFRM", "SOFI", "DKNG", "RDDT",
+    "HOOD", "IONQ", "RGTI", "OKLO", "SMR", "TSM", "ASML", "META", "AMZN", "GOOGL",
+]
+
+# Nasdaq-100 (yaklaşık) — daha geniş ve anlamlı RS sıralaması için
+NASDAQ100 = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "AVGO", "TSLA", "COST",
+    "NFLX", "ASML", "AMD", "PEP", "ADBE", "LIN", "CSCO", "TMUS", "INTU", "QCOM",
+    "TXN", "AMGN", "ISRG", "AMAT", "BKNG", "HON", "VRTX", "PANW", "ADP", "MU",
+    "ADI", "GILD", "REGN", "LRCX", "MELI", "SBUX", "MDLZ", "KLAC", "SNPS", "CDNS",
+    "CRWD", "CEG", "MAR", "PYPL", "ORLY", "CSX", "ABNB", "MRVL", "FTNT", "DASH",
+    "WDAY", "ADSK", "NXPI", "ROP", "TTD", "CHTR", "PCAR", "MNST", "AEP", "PAYX",
+    "KDP", "ODFL", "FAST", "EA", "CTAS", "VRSK", "DDOG", "EXC", "GEHC", "KHC",
+    "CCEP", "LULU", "BKR", "XEL", "CSGP", "IDXX", "ON", "TEAM", "ANSS", "ZS",
+    "CDW", "BIIB", "DXCM", "MCHP", "TTWO", "GFS", "ILMN", "WBD", "ARM", "PLTR",
+    "APP", "MSTR", "SMCI", "COIN",
+]
+
 # Renkler
 C_UP = "#16c784"
 C_DOWN = "#ea3943"
 C_ACCENT = "#3b82f6"
 C_PURPLE = "#a855f7"
 C_GOLD = "#f0b90b"
+
+# Makro / piyasa geneli enstrümanlar (risk iştahı okuması için)
+MACRO_ASSETS = {
+    "^GSPC": "S&P 500",
+    "^IXIC": "Nasdaq",
+    "^DJI": "Dow Jones",
+    "^RUT": "Russell 2000",
+    "^VIX": "VIX (Korku)",
+    "^TNX": "10Y Faiz",
+    "DX-Y.NYB": "Dolar (DXY)",
+    "GC=F": "Altın",
+    "CL=F": "Petrol",
+    "BTC-USD": "Bitcoin",
+}
+
+# Sektör ETF'leri (para hangi sektöre akıyor - sektör rotasyonu)
+SECTOR_ETFS = {
+    "XLK": "Teknoloji",
+    "XLF": "Finans",
+    "XLE": "Enerji",
+    "XLV": "Sağlık",
+    "XLY": "Tüketici (İsteğe Bağlı)",
+    "XLP": "Tüketici (Temel)",
+    "XLI": "Sanayi",
+    "XLB": "Hammadde",
+    "XLU": "Kamu Hizmetleri",
+    "XLRE": "Gayrimenkul",
+    "XLC": "İletişim",
+}
 
 # ===========================================================================
 # TEKNİK HESAPLAMALAR
@@ -79,6 +130,109 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
+
+
+def compute_mfi(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Money Flow Index — hacim ağırlıklı RSI; para girişi/çıkışını ölçer."""
+    tp = (df["High"] + df["Low"] + df["Close"]) / 3
+    mf = tp * df["Volume"]
+    pos = mf.where(tp > tp.shift(), 0.0)
+    neg = mf.where(tp < tp.shift(), 0.0)
+    pos_sum = pos.rolling(period).sum()
+    neg_sum = neg.rolling(period).sum()
+    mfr = pos_sum / neg_sum.replace(0, np.nan)
+    return 100 - (100 / (1 + mfr))
+
+
+def compute_obv(df: pd.DataFrame) -> pd.Series:
+    """On-Balance Volume — hacmi fiyat yönüne göre toplar; birikim/dağıtım izi."""
+    direction = np.sign(df["Close"].diff()).fillna(0)
+    return (direction * df["Volume"]).cumsum()
+
+
+def relative_volume(df: pd.DataFrame, window: int = 20) -> float:
+    """Bugünkü hacim / son `window` günün ortalaması. >1.5 = olağandışı ilgi."""
+    if len(df) < window + 1:
+        return 1.0
+    avg = df["Volume"].iloc[-window - 1:-1].mean()
+    return float(df["Volume"].iloc[-1] / avg) if avg > 0 else 1.0
+
+
+def compute_adr_pct(df: pd.DataFrame, period: int = 20) -> float:
+    """Average Daily Range % — günlük volatilite (Qullamaggie/Minervini metriği)."""
+    if len(df) < period + 1:
+        period = max(2, len(df) - 1)
+    dr = df["High"] / df["Low"]
+    return float((dr.iloc[-period:].mean() - 1) * 100)
+
+
+def momentum_score(df: pd.DataFrame) -> float:
+    """IBD tarzı ağırlıklı getiri (göreli güç ham puanı)."""
+    c = df["Close"]
+    def ret(n):
+        return c.iloc[-1] / c.iloc[-n] - 1 if len(c) > n else c.iloc[-1] / c.iloc[0] - 1
+    return 0.4 * ret(63) + 0.3 * ret(126) + 0.2 * ret(189) + 0.1 * ret(252)
+
+
+def trend_template(df: pd.DataFrame) -> dict:
+    """Minervini Trend Template kontrolleri + Qullamaggie EMA bulutu durumu."""
+    c = df["Close"]
+    price = float(c.iloc[-1])
+    ema10 = compute_ema(c, 10).iloc[-1]
+    ema20 = compute_ema(c, 20).iloc[-1]
+    sma50 = c.rolling(50).mean().iloc[-1] if len(c) >= 50 else c.mean()
+    sma150 = c.rolling(150).mean().iloc[-1] if len(c) >= 150 else c.mean()
+    sma200 = c.rolling(200).mean().iloc[-1] if len(c) >= 200 else c.mean()
+    sma200_prev = c.rolling(200).mean().iloc[-21] if len(c) >= 221 else sma200
+    high52 = float(c.iloc[-252:].max()) if len(c) >= 60 else float(c.max())
+    low52 = float(c.iloc[-252:].min()) if len(c) >= 60 else float(c.min())
+
+    checks = {
+        "Fiyat > 50MA": price > sma50,
+        "50MA > 150MA": sma50 > sma150,
+        "150MA > 200MA": sma150 > sma200,
+        "200MA yükseliyor": sma200 > sma200_prev,
+        "52H zirvenin %25'i içinde": price >= high52 * 0.75,
+        "52H dipten %30+ yukarı": price >= low52 * 1.30,
+        "Bulut üstünde (EMA10>EMA20)": price > ema10 and ema10 > ema20,
+    }
+    return {
+        "passed": sum(checks.values()),
+        "total": len(checks),
+        "checks": checks,
+        "above_cloud": price > ema10 > ema20,
+        "above_50": price > sma50,
+        "pct_from_high": round((price / high52 - 1) * 100, 1),
+        "high52": round(high52, 2),
+    }
+
+
+def detect_setup(df: pd.DataFrame) -> str:
+    """Mum yapısına göre setup etiketi (bayrak / kırılım / trend)."""
+    c = df["Close"]
+    if len(c) < 25:
+        return "Yetersiz veri"
+    ema10, ema20 = compute_ema(c, 10), compute_ema(c, 20)
+    price = float(c.iloc[-1])
+    above_cloud = price > ema10.iloc[-1] > ema20.iloc[-1]
+
+    # Son 10 mumun sıkışması (bayrak): dar aralık + bulut üstü
+    recent = c.iloc[-10:]
+    rng = (recent.max() - recent.min()) / recent.min() * 100
+    adr = compute_adr_pct(df)
+    cons_high = float(df["High"].iloc[-11:-1].max())
+    vol_now = df["Volume"].iloc[-1]
+    vol_avg = df["Volume"].iloc[-20:].mean()
+
+    if above_cloud and price > cons_high and vol_now > vol_avg * 1.3:
+        return "🚀 Kırılım (Breakout)"
+    if above_cloud and rng < adr * 2.2:
+        return "🏴 Bayrak / Sıkışma"
+    if above_cloud:
+        return "📈 Trend (bulut üstü)"
+    if price < ema20.iloc[-1]:
+        return "⚠️ Bulut altı (zayıf)"
+    return "↔️ Belirsiz"
 
 
 def wilder_atr(df: pd.DataFrame, period: int) -> pd.Series:
@@ -208,6 +362,21 @@ def system_decision(score: int) -> str:
 # ===========================================================================
 # VERİ ÇEKME (cache'li)
 # ===========================================================================
+
+@st.cache_data(ttl=180, show_spinner=False)
+def fetch_daily(ticker: str, period: str = "3mo") -> pd.DataFrame | None:
+    """Günlük veri (Piyasa Nabzı için, kısa cache = canlıya yakın)."""
+    try:
+        df = yf.download(ticker, period=period, interval="1d",
+                         progress=False, auto_adjust=True)
+        if df is None or len(df) < 2:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df.dropna()
+    except Exception:
+        return None
+
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_data(ticker: str, period: str, interval: str) -> pd.DataFrame | None:
@@ -665,6 +834,435 @@ def page_analysis(tickers, period, interval, key_value, atr_period, initial_cash
         st.dataframe(pd.DataFrame(result["trades"]), use_container_width=True, hide_index=True)
     else:
         st.warning("Bu ayarlarla işlem sinyali üretilmedi.")
+
+
+def detect_whale_activity(tickers: list) -> pd.DataFrame:
+    """Havuzu tarar; olağandışı hacim + para akışı ile birikim/dağıtım tespiti."""
+    rows = []
+    prog = st.progress(0.0, text="Para akışı taranıyor...")
+    for i, t in enumerate(tickers):
+        prog.progress((i + 1) / len(tickers), text=f"İnceleniyor: {t}")
+        df = fetch_daily(t, "3mo")
+        if df is None or len(df) < 25:
+            continue
+        rvol = relative_volume(df)
+        chg = (df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100
+        mfi = compute_mfi(df).iloc[-1]
+        mfi = round(float(mfi), 1) if not pd.isna(mfi) else 50.0
+        obv = compute_obv(df)
+        obv_slope = obv.iloc[-1] - obv.iloc[-6] if len(obv) > 6 else 0  # son 5 gün eğilim
+        dollar_vol = df["Close"].iloc[-1] * df["Volume"].iloc[-1]
+
+        # Yorum: birikim mi dağıtım mı?
+        if rvol >= 1.5 and chg > 0 and mfi > 55 and obv_slope > 0:
+            durum = "🐋 Birikim (Accumulation)"
+        elif rvol >= 1.5 and chg < 0 and (mfi < 45 or obv_slope < 0):
+            durum = "📉 Dağıtım (Distribution)"
+        elif rvol >= 2.0:
+            durum = "⚡ Olağandışı Hacim"
+        else:
+            durum = "—"
+
+        rows.append({
+            "Hisse": t,
+            "Durum": durum,
+            "Göreli Hacim": round(rvol, 2),
+            "Günlük %": round(float(chg), 2),
+            "MFI": mfi,
+            "OBV Eğilim": "↑ Yukarı" if obv_slope > 0 else ("↓ Aşağı" if obv_slope < 0 else "→"),
+            "$ Hacim (M)": round(dollar_vol / 1e6, 1),
+            "Fiyat": round(float(df["Close"].iloc[-1]), 2),
+        })
+    prog.empty()
+    return pd.DataFrame(rows)
+
+
+def detect_downtrend_line(df: pd.DataFrame, lookback: int = 45):
+    """Konsolidasyondaki düşen direnç çizgisini (zirve → daha düşük tepe) bulur."""
+    if len(df) < 10:
+        return None
+    gap = 4
+    sub = df.iloc[-lookback:]
+    highs = sub["High"].values
+    idx = sub.index
+    p1 = int(np.argmax(highs))                 # en yüksek tepe
+    if p1 >= len(highs) - gap - 1:              # tepe çok yakınsa çizgi anlamsız
+        return None
+    after = highs[p1 + gap:]                     # zirveden en az `gap` mum sonra ikinci tepe
+    if len(after) == 0:
+        return None
+    p2 = p1 + gap + int(np.argmax(after))
+    if highs[p2] > highs[p1] or p2 == p1:        # ikinci tepe zirveyi aşmamalı (eşit/düşük olabilir)
+        return None
+    slope = (highs[p2] - highs[p1]) / (p2 - p1)
+    x_end = len(highs) - 1
+    y_end = highs[p1] + slope * (x_end - p1)
+    return {"x0": idx[p1], "y0": float(highs[p1]),
+            "x1": idx[x_end], "y1": float(y_end)}
+
+
+def make_cloud_chart(df: pd.DataFrame, title: str) -> go.Figure:
+    """Qullamaggie tarzı 10/20 EMA bulutu + 50/200 SMA + düşen trend çizgisi grafiği."""
+    c = df["Close"]
+    ema10, ema20 = compute_ema(c, 10), compute_ema(c, 20)
+    sma50 = c.rolling(50).mean()
+    sma200 = c.rolling(200).mean()
+
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.78, 0.22],
+                        vertical_spacing=0.04, subplot_titles=(title, "Hacim"))
+
+    # EMA bulutu (10-20 arası dolgu)
+    fig.add_trace(go.Scatter(x=df.index, y=ema20, line=dict(width=0), showlegend=False,
+                  hoverinfo="skip"), row=1, col=1)
+    cloud_up = (ema10 >= ema20).iloc[-1]
+    fig.add_trace(go.Scatter(x=df.index, y=ema10, fill="tonexty", name="EMA 10/20 Bulut",
+                  line=dict(color="rgba(22,199,132,0.6)", width=1),
+                  fillcolor="rgba(22,199,132,0.18)" if cloud_up else "rgba(234,57,67,0.18)"),
+                  row=1, col=1)
+
+    fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"],
+                  close=df["Close"], name="Fiyat", increasing_line_color=C_UP,
+                  decreasing_line_color=C_DOWN, increasing_fillcolor=C_UP,
+                  decreasing_fillcolor=C_DOWN), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=sma50, name="SMA 50",
+                  line=dict(color=C_ACCENT, width=1.5)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=sma200, name="SMA 200",
+                  line=dict(color="#ef5350", width=1.2)), row=1, col=1)
+
+    # Düşen trend (direnç) çizgisi — TradingView'daki beyaz diyagonal
+    dt = detect_downtrend_line(df)
+    if dt:
+        fig.add_trace(go.Scatter(x=[dt["x0"], dt["x1"]], y=[dt["y0"], dt["y1"]],
+                      mode="lines", name="Düşen Trend Çizgisi",
+                      line=dict(color="white", width=2, dash="solid")), row=1, col=1)
+
+    colors = [C_UP if cl >= o else C_DOWN for cl, o in zip(df["Close"], df["Open"])]
+    fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Hacim",
+                  marker_color=colors, opacity=0.55), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["Volume"].rolling(50).mean(), name="Hacim Ort.",
+                  line=dict(color=C_GOLD, width=1)), row=2, col=1)
+
+    fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+                      plot_bgcolor="rgba(13,17,28,1)", height=600, xaxis_rangeslider_visible=False,
+                      legend=dict(orientation="h", y=1.03, x=1, xanchor="right", font=dict(size=11)),
+                      margin=dict(l=10, r=10, t=50, b=10), hovermode="x unified")
+    fig.update_yaxes(gridcolor="rgba(255,255,255,0.05)")
+    fig.update_xaxes(gridcolor="rgba(255,255,255,0.04)")
+    return fig
+
+
+def scan_momentum(universe: list, min_rs: int, min_adr: float) -> pd.DataFrame:
+    """Qullamaggie/Minervini momentum breakout taraması."""
+    rows = []
+    prog = st.progress(0.0, text="Momentum taraması...")
+    raw = []
+    for i, t in enumerate(universe):
+        prog.progress((i + 1) / len(universe), text=f"Taranıyor: {t}")
+        df = fetch_daily(t, "1y")
+        if df is None or len(df) < 60:
+            continue
+        raw.append((t, df, momentum_score(df)))
+
+    if not raw:
+        prog.empty()
+        return pd.DataFrame()
+
+    # RS Rating: havuz içi yüzdelik sıralama (1-99)
+    scores = pd.Series({t: s for t, _, s in raw}).rank(pct=True) * 98 + 1
+
+    for t, df, _ in raw:
+        tt = trend_template(df)
+        adr = compute_adr_pct(df)
+        rs = int(round(scores[t]))
+        setup = detect_setup(df)
+        chg = (df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100
+        rvol = relative_volume(df)
+        rows.append({
+            "Hisse": t,
+            "Setup": setup,
+            "RS": rs,
+            "ADR %": round(adr, 1),
+            "Trend": f"{tt['passed']}/{tt['total']}",
+            "Zirveye %": tt["pct_from_high"],
+            "Gör. Hacim": round(rvol, 2),
+            "Günlük %": round(float(chg), 2),
+            "Fiyat": round(float(df["Close"].iloc[-1]), 2),
+            "_pass": tt["passed"], "_adr": adr, "_rs": rs,
+            "_above": tt["above_cloud"] and tt["above_50"],
+        })
+    prog.empty()
+    df = pd.DataFrame(rows)
+    # Filtre: RS ve ADR eşiği + trend yapısı sağlam
+    df = df[(df["_rs"] >= min_rs) & (df["_adr"] >= min_adr) & (df["_above"])]
+    return df.sort_values(["_pass", "_rs"], ascending=False)
+
+
+def page_momentum():
+    st.subheader("🚀 Momentum / Breakout Tarayıcı")
+    st.caption("Qullamaggie & Minervini tarzı: güçlü momentum (yüksek RS) + yüksek ADR% + "
+               "EMA bulutu üstünde sıkışma/kırılım. Tıpkı FCEL, ARM, FLNC tarzı kurulumlar.")
+
+    c = st.columns(3)
+    min_rs = c[0].slider("Min. RS Rating", 50, 99, 80, help="Göreli güç (havuz içi yüzdelik). IBD: 80+ ideal")
+    min_adr = c[1].slider("Min. ADR %", 1.0, 15.0, 4.0, 0.5, help="Volatilite. Momentum için 4%+ tercih edilir")
+    evren = c[2].selectbox("Tarama Evreni",
+                           ["Hazır Momentum (40)", "Nasdaq-100 (geniş, yavaş)", "Kendi listem"],
+                           help="Evren büyüdükçe RS Rating daha anlamlı olur ama tarama uzar.")
+
+    if evren == "Nasdaq-100 (geniş, yavaş)":
+        universe = sorted(set(NASDAQ100))
+        st.caption(f"⏳ {len(universe)} hisse taranacak — ilk seferde ~30-60 sn sürebilir (sonra 3 dk cache'li).")
+    elif evren == "Kendi listem":
+        txt = st.text_input("Ticker listesi (virgülle)", ", ".join(MOMENTUM_UNIVERSE[:10]))
+        universe = [t.strip().upper() for t in txt.split(",") if t.strip()] or MOMENTUM_UNIVERSE
+    else:
+        universe = MOMENTUM_UNIVERSE
+
+    if st.button("🔍 Momentum Tara", type="primary", use_container_width=True):
+        st.session_state["mom_scan"] = scan_momentum(universe, min_rs, min_adr)
+
+    df = st.session_state.get("mom_scan")
+    if df is None:
+        st.info("👆 'Momentum Tara' butonuna bas. (Tarama biraz sürebilir — 1 yıllık veri çekiliyor.)")
+        return
+    if df.empty:
+        st.warning("Bu filtrelerle eşleşen hisse yok. RS/ADR eşiğini düşürmeyi dene.")
+        return
+
+    # En iyi adaylar kart halinde
+    st.markdown(f"### 🎯 {len(df)} Aday (güçlüden zayıfa)")
+    recs = df.to_dict("records")
+    per_row = 3
+    for start in range(0, min(len(recs), 9), per_row):
+        cols = st.columns(per_row)
+        for col, r in zip(cols, recs[start:start + per_row]):
+            dcol = C_UP if r["Günlük %"] >= 0 else C_DOWN
+            col.markdown(
+                f'<div style="background:rgba(59,130,246,0.10);border:1px solid {C_ACCENT};'
+                f'border-radius:12px;padding:12px;margin-bottom:10px;">'
+                f'<div style="font-size:1.15rem;font-weight:800;color:#fff;">{r["Hisse"]} '
+                f'<span style="font-size:0.85rem;color:{dcol};">{r["Günlük %"]:+.2f}%</span></div>'
+                f'<div style="font-size:0.82rem;color:#bbb;margin:4px 0;">{r["Setup"]}</div>'
+                f'<div style="font-size:0.78rem;color:#999;">RS <b style="color:#f0b90b;">{r["RS"]}</b> • '
+                f'ADR {r["ADR %"]}% • Trend {r["Trend"]} • Zirveye {r["Zirveye %"]}%</div>'
+                f'<div style="font-size:0.78rem;color:#999;">${r["Fiyat"]} • Gör.Hacim {r["Gör. Hacim"]}x</div>'
+                f'</div>', unsafe_allow_html=True)
+
+    st.markdown("#### 📊 Tüm Adaylar")
+    show = df.drop(columns=[c for c in df.columns if c.startswith("_")])
+    st.dataframe(show, use_container_width=True, hide_index=True,
+                 column_config={
+                     "RS": st.column_config.ProgressColumn(min_value=0, max_value=99, format="%d"),
+                     "Günlük %": st.column_config.NumberColumn(format="%.2f%%"),
+                     "Zirveye %": st.column_config.NumberColumn(format="%.1f%%"),
+                 })
+
+    st.divider()
+    # Seçili hissenin bulut grafiği
+    pick = st.selectbox("📈 Grafiğini gör (EMA bulutu)", show["Hisse"].tolist())
+    if pick:
+        cdf = fetch_daily(pick, "1y")
+        if cdf is not None:
+            st.plotly_chart(make_cloud_chart(cdf, f"{pick} • 10/20 EMA Bulut + 50/200 SMA"),
+                            use_container_width=True)
+
+    with st.expander("📚 Bu sistem nasıl çalışır?"):
+        st.markdown("""
+**Qullamaggie / Minervini Momentum Breakout sistemi:**
+
+1. **Güçlü momentum (RS Rating):** Hisse son aylarda piyasadan çok daha fazla yükselmiş olmalı.
+   RS 80-99 = en güçlü %20'lik dilim. Lider hisseleri seçmek için ilk filtre.
+2. **Yüksek ADR%:** Günlük ortalama hareket aralığı. Yüksek ADR = daha çok hareket = daha çok fırsat.
+   Qullamaggie genelde **%5+** arar.
+3. **EMA Bulutu (10/20):** Fiyat bulutun üstündeyse trend sağlam. Geri çekilmeler buluta kadardır.
+4. **Trend Template (Minervini):** Fiyat > 50MA > 150MA > 200MA, 200MA yukarı, zirveye yakın.
+5. **Setup:**
+   - **🏴 Bayrak/Sıkışma:** Büyük yükseliş sonrası bulut üstünde dar konsolidasyon.
+   - **🚀 Kırılım:** Konsolidasyon tepesini (veya düşen trend çizgisini) **hacimle** kırması = alım tetiği.
+6. **Stop:** Genelde kırılım mumunun dibi veya 10/20 EMA bulutunun altı.
+
+**Önemli:** RS Rating burada *havuz içi* yüzdelik sıralamadır (gerçek IBD tüm borsayı kapsar).
+Listeyi büyüttükçe RS daha anlamlı olur.
+        """)
+
+
+def _build_daily_summary(spx_chg, vix_chg, sec_df, wdf) -> str:
+    """Makro + sektör + para akışını tek paragrafta özetler."""
+    tarih = datetime.now().strftime("%d.%m.%Y")
+    parts = [f"**{tarih} piyasa görünümü:**", ""]
+
+    # Risk iştahı
+    if spx_chg > 0 and vix_chg < 0:
+        parts.append(f"- 🟢 **Risk-On ortam.** S&P 500 **{spx_chg:+.2f}%**, korku endeksi VIX **{vix_chg:+.2f}%**. "
+                     "Piyasa iştahlı; trend yönünde (long) kurulumlar daha güvenli.")
+    elif spx_chg < 0 and vix_chg > 0:
+        parts.append(f"- 🔴 **Risk-Off ortam.** S&P 500 **{spx_chg:+.2f}%**, VIX **{vix_chg:+.2f}%** yükseldi. "
+                     "Temkinli ol; pozisyonları küçült, savunma sektörlerine bak.")
+    else:
+        parts.append(f"- 🟡 **Karışık ortam.** S&P 500 **{spx_chg:+.2f}%**, VIX **{vix_chg:+.2f}%**. "
+                     "Net yön yok; seçici ol ve teyit bekle.")
+
+    # Sektör rotasyonu
+    if sec_df is not None and not sec_df.empty:
+        best, worst = sec_df.iloc[0], sec_df.iloc[-1]
+        parts.append(f"- 💰 **Para girişi:** {best['Sektör']} (haftalık {best['Haftalık %']:+.2f}%). "
+                     f"💸 **Para çıkışı:** {worst['Sektör']} (haftalık {worst['Haftalık %']:+.2f}%). "
+                     f"Güçlü sektördeki güçlü hisseler önceliklidir.")
+
+    # Balina / para akışı
+    if wdf is not None and not wdf.empty:
+        acc = wdf[wdf["Durum"].str.contains("Birikim")]
+        dist = wdf[wdf["Durum"].str.contains("Dağıtım")]
+        unusual = wdf[wdf["Durum"].str.contains("Olağandışı")]
+        if not acc.empty:
+            isimler = ", ".join(acc.sort_values("Göreli Hacim", ascending=False)["Hisse"].head(4))
+            parts.append(f"- 🐋 **Birikim (alıcı baskısı):** {isimler}.")
+        if not dist.empty:
+            isimler = ", ".join(dist.sort_values("Göreli Hacim", ascending=False)["Hisse"].head(4))
+            parts.append(f"- 📉 **Dağıtım (satıcı baskısı):** {isimler}.")
+        if not unusual.empty:
+            isimler = ", ".join(unusual.sort_values("Göreli Hacim", ascending=False)["Hisse"].head(4))
+            parts.append(f"- ⚡ **Olağandışı hacim:** {isimler}.")
+    else:
+        parts.append("- 🐋 Para akışı detayı için yukarıdan **'Para Akışını Tara'** butonuna bas.")
+
+    parts.append("")
+    parts.append("> Bu özet otomatik üretildi, yatırım tavsiyesi değildir.")
+    return "\n".join(parts)
+
+
+def page_market_pulse(tickers):
+    st.subheader("🐋 Piyasa Nabzı — Makro, Sektör Rotasyonu & Para Akışı")
+    top = st.columns([3, 1])
+    top[0].caption("Veri ~15 dk gecikmeli (Yahoo Finance). 'Yenile' ile güncelle veya cache 3 dk'da otomatik tazelenir.")
+    if top[1].button("🔄 Yenile", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
+    st.caption(f"Son güncelleme: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+
+    # ---------- 1) MAKRO TABLO ----------
+    st.markdown("### 🌍 Günlük Makro Özet")
+    macro_rows, spx_chg, vix_chg = [], 0, 0
+    for sym, name in MACRO_ASSETS.items():
+        df = fetch_daily(sym, "5d")
+        if df is None or len(df) < 2:
+            continue
+        chg = (df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100
+        if sym == "^GSPC": spx_chg = chg
+        if sym == "^VIX": vix_chg = chg
+        macro_rows.append({"Varlık": name, "Fiyat": round(float(df["Close"].iloc[-1]), 2),
+                           "Günlük %": round(float(chg), 2)})
+    if macro_rows:
+        cols = st.columns(5)
+        for i, r in enumerate(macro_rows):
+            cols[i % 5].metric(r["Varlık"], f"{r['Fiyat']:,}", f"{r['Günlük %']:+.2f}%")
+
+        # Risk-on / risk-off okuması
+        if spx_chg > 0 and vix_chg < 0:
+            st.success("🟢 **Risk-On:** Endeksler yukarı, korku (VIX) aşağı. Piyasa iştahı pozitif — long kurulumlar öne çıkar.")
+        elif spx_chg < 0 and vix_chg > 0:
+            st.error("🔴 **Risk-Off:** Endeksler aşağı, korku (VIX) yukarı. Temkinli ol, nakit/savunma sektörleri öne çıkar.")
+        else:
+            st.info("🟡 **Karışık:** Net bir risk yönü yok; seçici ol, teyit bekle.")
+
+    st.divider()
+
+    # ---------- 2) SEKTÖR ROTASYONU (KARE KARE) ----------
+    st.markdown("### 🔄 Sektör Rotasyonu — Para Nereye Akıyor?")
+    sec_rows = []
+    for sym, name in SECTOR_ETFS.items():
+        df = fetch_daily(sym, "1mo")
+        if df is None or len(df) < 6:
+            continue
+        d1 = (df["Close"].iloc[-1] - df["Close"].iloc[-2]) / df["Close"].iloc[-2] * 100
+        d5 = (df["Close"].iloc[-1] - df["Close"].iloc[-6]) / df["Close"].iloc[-6] * 100
+        sec_rows.append({"Sektör": name, "Sembol": sym,
+                        "Günlük %": round(float(d1), 2), "Haftalık %": round(float(d5), 2)})
+
+    sec_df = pd.DataFrame()
+    if sec_rows:
+        sec_df = pd.DataFrame(sec_rows).sort_values("Haftalık %", ascending=False)
+        best = sec_df.iloc[0]; worst = sec_df.iloc[-1]
+        st.markdown(f"💰 **Para girişi:** {best['Sektör']} (haftalık {best['Haftalık %']:+}%) &nbsp;|&nbsp; "
+                    f"💸 **Para çıkışı:** {worst['Sektör']} (haftalık {worst['Haftalık %']:+}%)")
+
+        # Kare kart ızgarası — tüm sektörler (haftalığa göre güçlüden zayıfa)
+        per_row = 4
+        recs = sec_df.to_dict("records")
+        for start in range(0, len(recs), per_row):
+            cols = st.columns(per_row)
+            for col, r in zip(cols, recs[start:start + per_row]):
+                wk = r["Haftalık %"]
+                # Renk: güçlü yeşilden güçlü kırmızıya
+                if wk >= 2: bg, brd = "rgba(22,199,132,0.22)", C_UP
+                elif wk >= 0: bg, brd = "rgba(22,199,132,0.10)", C_UP
+                elif wk > -2: bg, brd = "rgba(234,57,67,0.10)", C_DOWN
+                else: bg, brd = "rgba(234,57,67,0.22)", C_DOWN
+                dcol = C_UP if r["Günlük %"] >= 0 else C_DOWN
+                wcol = C_UP if wk >= 0 else C_DOWN
+                col.markdown(
+                    f'<div style="background:{bg};border:1px solid {brd};border-radius:12px;'
+                    f'padding:12px;text-align:center;margin-bottom:10px;min-height:108px;">'
+                    f'<div style="font-size:0.9rem;font-weight:700;color:#eee;">{r["Sektör"]}</div>'
+                    f'<div style="font-size:0.7rem;color:#888;">{r["Sembol"]}</div>'
+                    f'<div style="font-size:1.4rem;font-weight:800;color:{wcol};margin-top:6px;">{wk:+.2f}%</div>'
+                    f'<div style="font-size:0.72rem;color:#999;">haftalık</div>'
+                    f'<div style="font-size:0.8rem;color:{dcol};margin-top:2px;">bugün {r["Günlük %"]:+.2f}%</div>'
+                    f'</div>', unsafe_allow_html=True)
+
+    st.divider()
+
+    # ---------- 3) BALİNA / PARA AKIŞI RADARI ----------
+    st.markdown("### 🐋 Balina & Olağandışı Hacim Radarı")
+    st.caption("Hisse havuzunda kurumsal/balina aktivitesi vekil göstergelerle taranır.")
+    if st.button("🔍 Para Akışını Tara", type="primary", use_container_width=True):
+        st.session_state["whale_scan"] = detect_whale_activity(tickers)
+
+    wdf = st.session_state.get("whale_scan")
+    if wdf is not None and not wdf.empty:
+        acc = wdf[wdf["Durum"].str.contains("Birikim")].sort_values("Göreli Hacim", ascending=False)
+        dist = wdf[wdf["Durum"].str.contains("Dağıtım")].sort_values("Göreli Hacim", ascending=False)
+        unusual = wdf[wdf["Durum"].str.contains("Olağandışı")].sort_values("Göreli Hacim", ascending=False)
+
+        cc = st.columns(3)
+        cc[0].metric("🐋 Birikim", len(acc))
+        cc[1].metric("📉 Dağıtım", len(dist))
+        cc[2].metric("⚡ Olağandışı Hacim", len(unusual))
+
+        st.dataframe(
+            wdf.sort_values("Göreli Hacim", ascending=False),
+            use_container_width=True, hide_index=True,
+            column_config={
+                "Göreli Hacim": st.column_config.NumberColumn(format="%.2fx",
+                    help="Bugünkü hacim / 20 gün ort. >1.5 olağandışı, >2 güçlü ilgi"),
+                "Günlük %": st.column_config.NumberColumn(format="%.2f%%"),
+                "MFI": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%d"),
+            })
+
+    # ---------- 4) GÜNÜN OTOMATİK ÖZETİ ----------
+    st.divider()
+    st.markdown("### 📋 Günün Özeti")
+    st.markdown(_build_daily_summary(spx_chg, vix_chg, sec_df, st.session_state.get("whale_scan")))
+
+    # ---------- 5) NASIL TESPİT EDİLİR (EĞİTİM) ----------
+    with st.expander("📚 Balinaları / para akışını nasıl tespit ederim?"):
+        st.markdown("""
+**Ücretsiz veriyle kurumsal (balina) aktivitesini bu vekil göstergelerle yakalarsın:**
+
+- **Göreli Hacim (RVOL):** Bugünkü hacim, 20 günlük ortalamanın 1.5–2 katından fazlaysa
+  fiyatın arkasında *büyük* bir oyuncu var demektir. Balina girişinin en hızlı işareti budur.
+- **MFI (Money Flow Index):** Hacim ağırlıklı RSI. MFI yükselirken fiyat da yükseliyorsa
+  **para giriyor (birikim)**; MFI düşerken fiyat düşüyorsa **para çıkıyor (dağıtım)**.
+- **OBV (On-Balance Volume):** Hacmi fiyat yönüne göre toplar. OBV fiyattan önce yön
+  değiştirirse, kurumlar sessizce topluyor/satıyor olabilir (öncü sinyal).
+- **Fiyat + Hacim birlikte:** Güçlü yükseliş + yüksek hacim = gerçek talep. Yükseliş ama
+  düşük hacim = zayıf, sürdürülemez.
+- **$ Hacim (Dollar Volume):** Fiyat × Hacim. Kurumlar büyük dolar hacimli hisseleri tercih eder.
+- **Sektör Rotasyonu:** Para önce sektöre, sonra hisseye gelir. Güçlü sektördeki güçlü hisse en iyisidir.
+
+**Not:** Gerçek dark-pool/blok emir/opsiyon akışı verisi ücretli servis (Unusual Whales vb.)
+gerektirir. Buradaki göstergeler bunların halka açık ve güvenilir *vekilleridir*.
+        """)
 
 
 def page_simulation(tickers, period, interval, initial_cash=10000.0, risk_pct=1.0):
@@ -1241,13 +1839,18 @@ def main():
         st.caption(f"Havuz: {len(tickers)} hisse")
         st.caption(", ".join(tickers[:8]) + ("..." if len(tickers) > 8 else ""))
 
-    tab1, tab2, tab3 = st.tabs(
-        ["📡 Piyasa Tarayıcı", "🤖 Detaylı Analiz", "🎮 Simülasyon"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["📡 Piyasa Tarayıcı", "🚀 Momentum/Breakout", "🐋 Piyasa Nabzı",
+         "🤖 Detaylı Analiz", "🎮 Simülasyon"])
     with tab1:
         page_scanner(tickers, period, interval, key_value, atr_period, initial_cash, risk_pct)
     with tab2:
-        page_analysis(tickers, period, interval, key_value, atr_period, initial_cash, fee_pct, risk_pct)
+        page_momentum()
     with tab3:
+        page_market_pulse(tickers)
+    with tab4:
+        page_analysis(tickers, period, interval, key_value, atr_period, initial_cash, fee_pct, risk_pct)
+    with tab5:
         page_simulation(tickers, period, interval, initial_cash, risk_pct)
 
 
