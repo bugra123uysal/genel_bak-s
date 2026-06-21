@@ -158,4 +158,4 @@ MIT License — istediğin gibi kullanabilir, değiştirebilir ve dağıtabilirs
   </a>
 
 </p>
-  linkedin: <a href="https://www.linkedin.com/in/mesut-bu%C4%9Fra-uysal-16a1bb288/">
+  linkedin: <a href="https://www.linkedin.com/in/mesut-bu%C4%9Fra-uysal-16a1bb288/"> linkedin
